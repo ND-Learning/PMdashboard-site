@@ -1,0 +1,78 @@
+# Nightly: fetch the freshly built dashboard from the builder repo, encrypt it
+# with the team password (StatiCrypt, AES-256 + PBKDF2), and commit the
+# encrypted index.html here. GitHub Pages (Source = main branch, /) serves it:
+#   https://nd-learning.github.io/PMdashboard-site/
+#
+# Only the ENCRYPTED file ever lands in this public repo. The password lives as
+# the STATICRYPT_PASSWORD Actions secret; rotate it there (Settings -> Secrets)
+# and re-run this workflow. STATICRYPT_SALT is a repo variable — it is embedded
+# in the served page anyway (not sensitive) and keeping it FIXED lets viewers'
+# "remember me for 30 days" survive nightly re-encryption.
+#
+# NOTE: if the builder repo (jliu234-cell/odl-pm-dashboard) is made private,
+# add a read-scoped PAT as a BUILDER_REPO_TOKEN secret and set
+#   token: ${{ secrets.BUILDER_REPO_TOKEN }}
+# on its checkout step below.
+name: encrypt-and-publish
+
+on:
+  schedule:
+    - cron: "30 14 * * *"   # after the builder's 13:00 UTC nightly rebuild
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: encrypt-and-publish
+  cancel-in-progress: false
+
+jobs:
+  encrypt-and-publish:
+    if: github.repository == 'ND-Learning/PMdashboard-site'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Check out the builder repo (fresh index.html)
+        uses: actions/checkout@v4
+        with:
+          repository: jliu234-cell/odl-pm-dashboard
+          path: _builder
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Encrypt the dashboard (StatiCrypt)
+        env:
+          STATICRYPT_PASSWORD: ${{ secrets.STATICRYPT_PASSWORD }}
+          SALT: ${{ vars.STATICRYPT_SALT }}
+        run: |
+          test -n "$STATICRYPT_PASSWORD" || { echo "::error::STATICRYPT_PASSWORD secret is not set"; exit 1; }
+          npm install --no-audit --no-fund --silent staticrypt@3.5.0 yargs@17.7.2
+          ./node_modules/.bin/staticrypt _builder/index.html -d _out \
+            --password "$STATICRYPT_PASSWORD" --remember 30 --salt "$SALT" \
+            --template-title "ODL PM Dashboard" \
+            --template-instructions "Enter the ODL team password (ask your PM)." \
+            --short
+          # belt-and-braces: the published file must not contain plaintext
+          if grep -q "Capacity Allocations" _out/index.html; then
+            echo "::error::plaintext leaked into encrypted output"; exit 1
+          fi
+
+      - name: Commit the encrypted site
+        run: |
+          cp _out/index.html index.html
+          touch .nojekyll
+          git config user.name  "odl-dashboard-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html .nojekyll
+          if git diff --cached --quiet; then
+            echo "No change — skipping commit."
+          else
+            git commit -m "encrypted dashboard $(date -u +%F)"
+            git push
+          fi
