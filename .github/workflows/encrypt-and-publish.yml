@@ -19,6 +19,9 @@ on:
   schedule:
     - cron: "30 14 * * *"   # after the builder's 13:00 UTC nightly rebuild
   workflow_dispatch: {}
+  push:                      # any push here (e.g. a workflow/README edit) republishes
+    branches: [main]         # immediately; the job's own GITHUB_TOKEN commit does not
+    paths-ignore: ["index.html", ".nojekyll"]   # retrigger (GitHub anti-recursion)
 
 permissions:
   contents: write
